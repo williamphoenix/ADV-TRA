@@ -1,6 +1,5 @@
-# ADV-TRA
-The code for  NeurIPS'25 paper "United We Stand, Divided We Fall: Fingerprinting Deep Neural Networks via Adversarial Trajectories"
 # United We Stand, Divided We Fall: Fingerprinting Deep Neural Networks via Adversarial Trajectories (ADV-TRA)
+The code for  NeurIPS'24 paper "United We Stand, Divided We Fall: Fingerprinting Deep Neural Networks via Adversarial Trajectories"
 
 ## About The Project
 **ADV-TRA** is an intellectual property (IP) protection framework for DNN models based on mdoel fingerprinting.
