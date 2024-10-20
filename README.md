@@ -94,7 +94,7 @@ $ python main.py --dataset "cifar10" --num_trajectories 100
 ```
 @inproceedings{,
   title={United We Stand, Divided We Fall: Fingerprinting Deep Neural Networks via Adversarial Trajectories}, 
-  author={Xu, Tianlong and Wang, Chen and Liu, Wei and Yang, Yang and Liu, Gaoyang},
+  author={Xu, Tianlong and Wang, Chen and Liu, Gaoyang and Yang, Yang and Peng, Kai and Liu, Wei},
   year={2024},
   booktitle={Proceedings of NeurIPS}
 }
