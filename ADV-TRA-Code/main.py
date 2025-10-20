@@ -10,7 +10,7 @@ from utils.adv_gen import generate_trajectory, verify_trajectory
 from utils.utils import build_model, train_model
 
 
-seed = 0
+seed = 1
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)  
@@ -58,18 +58,33 @@ def parse_args():
 
 
 def main(args):
-    # data split
-    allocate_data(args)
-    
-    # Train the source model
-    model = build_model(args)
-    model = train_model(model, args)
-    
-    # Generate fingerprints
+    # normalize dataset casing & num_classes
+    args.dataset = args.dataset.lower()
+    if args.dataset == "cifar10":
+        args.num_classes = 10
+    elif args.dataset == "cifar100":
+        args.num_classes = 100
+    elif args.dataset == "imagenet":
+        args.num_classes = 1000
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
+
+    # ensure allocated data exists (CIFAR path)
+    data_log_path = os.path.join(args.data_path, args.dataset, "allocated_data", "data_log.pth")
+    if not os.path.exists(data_log_path):
+        print(f"[info] Allocated data not found at {data_log_path}. Running allocate_data(args).")
+        allocate_data(args)
+    assert os.path.exists(data_log_path), f"Missing {data_log_path}"
+
+
+    # build + load CIFAR-10 model
+    #model = build_model(args).to(args.device)
+    #train_model(model, args)
+
+    # run trajectories + verification
     generate_trajectory(args)
-    
-    # verify
-    verify_trajectory(args)
+    #assert os.path.exists(args.suspect_path), f"Suspect model not found: {args.suspect_path}"
+    #verify_trajectory(args)
 
 
 
@@ -77,16 +92,9 @@ def main(args):
 
 if __name__ == '__main__':
     args = parse_args()
-    
-    if args.dataset == "cifar10":
-        args.num_classes = 10
-    elif args.dataset == "cifar100":
-        args.num_classes = 100
-    elif args.dataset == "imagenet":
-        args.num_classes = 1000
-        
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.device
+    # better determinism settings
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     main(args)
 
 

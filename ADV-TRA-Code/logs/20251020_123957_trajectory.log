@@ -1,0 +1,12 @@
+========== ADV-TRA RUN ==========
+Timestamp: Mon Oct 20 12:39:57 PM CDT 2025
+Parameters:
+  --length 6
+  --max_iteration 2000
+  --initial_stepsize 0.20
+  --tra_lr 0.20
+  --factor_lc 0.98
+  --factor_re 0.995
+  --threshold 0.5
+=================================
+

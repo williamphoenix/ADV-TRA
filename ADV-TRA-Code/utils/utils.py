@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from utils.models import wideresnet
 import copy
 import torch.nn as nn
+import os
 
 
 
@@ -95,6 +96,25 @@ def train_model(model, args):
         
     w = copy.deepcopy(model.state_dict())
     model_dir = args.model_path + '/' + args.dataset + '/'
+    os.makedirs(model_dir, exist_ok=True)
+
+    weights_path = os.path.join(model_dir, "source_model.pth")
+    logs_path = os.path.join(model_dir, "source_model_logs.pth")
+
+    torch.save(w, weights_path)
+    torch.save({
+        "loss_record": loss_record,
+        "acc_record": acc_record,
+        "test_acc_record": test_acc_record,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "initial_lr": args.initial_lr,
+        "seed":  args.seed if hasattr(args, "seed") else None,
+    }, logs_path)
+
+    print(f"[ok] Saved weights to {weights_path}")
+    print(f"[ok] Saved logs to {logs_path}")
+
     
     torch.save(w, model_dir + 'source_model.pth')
     torch.save(logs, model_dir + 'source_model_logs.pth')
