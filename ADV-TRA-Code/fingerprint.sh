@@ -1,3 +1,4 @@
+PYTHONUNBUFFERED=1 CUDA_LAUNCH_BLOCKING=1 \
 LOGFILE=logs/$(date +"%Y%m%d_%H%M%S")_trajectory.log && \
 {
   echo "========== ADV-TRA RUN =========="
@@ -13,12 +14,13 @@ LOGFILE=logs/$(date +"%Y%m%d_%H%M%S")_trajectory.log && \
   echo "================================="
   echo
 } | tee "$LOGFILE" && \
-python main.py \
+python -u main.py \
   --length 6 \
-  --max_iteration 2000 \
+  --max_iteration 1000 \
   --initial_stepsize 0.20 \
   --tra_lr 0.20 \
   --factor_lc 0.98 \
   --factor_re 0.995 \
   --threshold 0.5 \
+  --device cuda:2 \
   2>&1 | tee -a "$LOGFILE"
