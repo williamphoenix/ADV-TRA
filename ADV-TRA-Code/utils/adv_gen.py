@@ -31,6 +31,7 @@ def generate_unilateral_tra(model, image, target, args, num_epoch=300, coe3=1, c
     best_stepsize_list = None
     
     for epoch in range(num_epoch):
+        
         loss_all = torch.tensor(0.0).to(args.device)
         images_tra = []
         grad_list = []
@@ -38,6 +39,7 @@ def generate_unilateral_tra(model, image, target, args, num_epoch=300, coe3=1, c
         
         process_image = images_tra[0]
         for i in range(half_length):
+
             model.eval()
             model.zero_grad()
             # Set requires_grad attribute of tensor
@@ -65,6 +67,9 @@ def generate_unilateral_tra(model, image, target, args, num_epoch=300, coe3=1, c
         pred_list = []
         status1 = 0  # judge whether the other sample crosses the decision boundary
         status2 = 0  # judge whether the last sample crosses the decision boundary
+
+        
+            
         for j in range(1, half_length + 1):
             adv_image = images_tra[j]
             stepsize_list[j-1].requires_grad = True
@@ -102,6 +107,24 @@ def generate_unilateral_tra(model, image, target, args, num_epoch=300, coe3=1, c
                     loss_4 = -stepsize_list[j-1] * coe4
                     loss_all += loss_4
     
+
+        if (epoch % 50 == 0) or (epoch == num_epoch - 1):
+            sstack = torch.stack(stepsize_list)
+            s_min, s_mean, s_max = sstack.min().item(), sstack.mean().item(), sstack.max().item()
+            gradL2 = grad_list[-1].flatten().norm(p=2).item() if grad_list else 0.0
+            tgt_idx = int(target.item())
+            early_flips = sum(1 for p in pred_list[:-1] if p == tgt_idx)
+
+            # optional: show a real CE loss on the last unilateral point too
+            with torch.no_grad():
+                ce_last = F.cross_entropy(model(images_tra[-1]), target).item()
+
+            print(
+                f"[uni ep {epoch:04d}] stepsize[min/mean/max]={s_min:.4f}/{s_mean:.4f}/{s_max:.4f}  "
+                f"gradL2={gradL2:.4f}  early_flips={early_flips}  "
+                f"aux_loss={loss_all.item():.6e}  ce_last={ce_last:.4f}"
+            )
+        
         if loss_all != 0:      
             loss_all.backward()
 
@@ -257,6 +280,7 @@ def generate_trajectory(args):
         image, label = image.unsqueeze(0).to(args.device), label.unsqueeze(0).to(args.device)
         temp = generate_all_classes(source_model, image, label, args)
         candidates_total = len(images)
+        
 
         if temp is None:
             print(f"[{i}/{candidates_total}] ❌ Failed to generate trajectory for sample {i}")

@@ -1,115 +1,143 @@
 #!/usr/bin/env python3
-# finetune_attack.py
-# Usage examples:
-#  python finetune_attack.py --attack FTLL --source ./results/cifar10/source_model.pth --out_dir ./results/stolen
-#  python finetune_attack.py --attack RTAL --source ./results/cifar10/source_model.pth --out_dir ./results/stolen
+"""
+finetune_attack_remain.py
+
+A finetuning attack script which **only** uses the reserved attacker split
+(X_remain, y_remain) produced by allocate_data(...).
+
+Usage examples:
+  python finetune_attack_remain.py --attack FTLL --source ./results/cifar10/source_model.pth --out_dir ./results/stolen --device cuda:2
+  python finetune_attack_remain.py --attack RTAL --source ./results/cifar10/source_model.pth --out_dir ./results/stolen --device cuda:2
+"""
 
 import argparse
 import os
-import copy
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
 import torch.optim as optim
-from utils.utils import build_model  # assumes same project layout as your repo
+from torch.utils.data import TensorDataset, DataLoader
+from utils.utils import build_model
 
-def load_aux_dataset(args):
-    # paper uses a reserved 'remain' split for attacker data
+# ---------------------------
+# Data loader: ONLY X_remain / y_remain
+# ---------------------------
+def load_aux_dataset_from_remain(args):
     cache_path = os.path.join(args.data_path, args.dataset, "allocated_data", "data_log.pth")
-    cache = torch.load(cache_path)
-    # attacker uses X_remain / y_remain per paper
-    X = cache["X_remain"]
-    y = cache["y_remain"]
-    return DataLoader(TensorDataset(X, y), batch_size=args.batch_size, shuffle=True)
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"Allocated data not found at {cache_path}. Run allocate_data(args) first.")
+    cache = torch.load(cache_path, map_location="cpu")
+
+    if "X_remain" not in cache or "y_remain" not in cache:
+        raise KeyError(f"data_log.pth missing X_remain/y_remain keys. Keys present: {list(cache.keys())}")
+
+    X_remain = cache["X_remain"]
+    y_remain = cache["y_remain"]
+
+    if X_remain is None or len(X_remain) == 0:
+        raise ValueError("X_remain is empty — cannot run attacker training with no data.")
+
+    # print a short sanity summary
+    print(f"[info] Loaded attacker dataset (remain): X_remain={tuple(X_remain.shape)}  y_remain={tuple(y_remain.shape)}")
+
+    loader = DataLoader(
+        TensorDataset(X_remain, y_remain),
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=("cuda" in args.device),
+        drop_last=False,
+    )
+    return loader
+
+# ---------------------------
+# Utilities
+# ---------------------------
+def device_for(args):
+    if torch.cuda.is_available() and "cuda" in args.device:
+        return torch.device(args.device)
+    return torch.device("cpu")
+
+def robust_load_state(model, ckpt_path):
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(ckpt, dict):
+        state = ckpt.get("model_state", ckpt.get("state_dict", ckpt))
+    else:
+        state = ckpt
+    if isinstance(state, dict) and any(k.startswith("module.") for k in state.keys()):
+        state = {k.replace("module.", "", 1): v for k, v in state.items()}
+    try:
+        model.load_state_dict(state, strict=True)
+    except Exception:
+        model.load_state_dict(state, strict=False)
+
+def find_last_linear(model):
+    last = None
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            last = (name, module)
+    return last
 
 def reinit_last_layer(model):
-    """
-    Reinitialize the final linear layer weights and bias.
-    Handles common patterns (resnet: model.fc, torchvision models: classifier, linear).
-    """
-    if hasattr(model, "fc") and isinstance(model.fc, nn.Linear):
-        nn.init.kaiming_normal_(model.fc.weight, nonlinearity='linear')
-        if model.fc.bias is not None:
-            nn.init.zeros_(model.fc.bias)
-    elif hasattr(model, "classifier") and isinstance(model.classifier, nn.Linear):
-        nn.init.kaiming_normal_(model.classifier.weight, nonlinearity='linear')
-        if model.classifier.bias is not None:
-            nn.init.zeros_(model.classifier.bias)
-    else:
-        # fallback: search for last linear module
-        last_lin = None
-        for name, module in reversed(list(model.named_modules())):
-            if isinstance(module, nn.Linear):
-                last_lin = module
-                break
-        if last_lin is not None:
-            nn.init.kaiming_normal_(last_lin.weight, nonlinearity='linear')
-            if last_lin.bias is not None:
-                nn.init.zeros_(last_lin.bias)
-        else:
-            raise RuntimeError("Couldn't find final linear layer to reinit on model")
+    pair = find_last_linear(model)
+    if pair is None:
+        raise RuntimeError("No nn.Linear layer found to reinitialize.")
+    _, lin = pair
+    nn.init.kaiming_normal_(lin.weight, nonlinearity="linear")
+    if lin.bias is not None:
+        nn.init.zeros_(lin.bias)
 
 def set_trainable_layers(model, attack_type):
-    """
-    Returns list of model parameters to pass to optimizer according to attack_type:
-      FTLL: freeze all except last layer
-      FTAL: all layers trainable
-      RTLL: reinit last layer then train only last layer
-      RTAL: reinit all layers then train all layers (paper: re-init then train all)
-    """
+    # default all trainable
+    for p in model.parameters():
+        p.requires_grad = True
+
+    last_pair = find_last_linear(model)
+    last_name, last_lin = (last_pair if last_pair is not None else (None, None))
+
     if attack_type == "FTLL":
         for p in model.parameters():
             p.requires_grad = False
-        # enable last linear
-        if hasattr(model, "fc") and isinstance(model.fc, nn.Linear):
-            for p in model.fc.parameters():
-                p.requires_grad = True
-        elif hasattr(model, "classifier") and isinstance(model.classifier, nn.Linear):
-            for p in model.classifier.parameters():
-                p.requires_grad = True
-        else:
-            # last linear fallback
-            for name, module in model.named_modules():
-                if isinstance(module, nn.Linear) and name.count(".") == 0:
-                    for p in module.parameters():
-                        p.requires_grad = True
-    elif attack_type == "FTAL":
-        for p in model.parameters():
+        if last_lin is None:
+            raise RuntimeError("FTLL: couldn't find final linear layer.")
+        for p in last_lin.parameters():
             p.requires_grad = True
+
+    elif attack_type == "FTAL":
+        pass
+
     elif attack_type == "RTLL":
+        if last_lin is None:
+            raise RuntimeError("RTLL: couldn't find final linear layer.")
         reinit_last_layer(model)
-        # freeze others
         for p in model.parameters():
             p.requires_grad = False
-        # last layer trainable
-        if hasattr(model, "fc") and isinstance(model.fc, nn.Linear):
-            for p in model.fc.parameters():
-                p.requires_grad = True
-        elif hasattr(model, "classifier") and isinstance(model.classifier, nn.Linear):
-            for p in model.classifier.parameters():
-                p.requires_grad = True
-        else:
-            # fallback enable last linear found earlier
-            for name, module in model.named_modules():
-                if isinstance(module, nn.Linear):
-                    for p in module.parameters():
-                        p.requires_grad = True
-                    break
+        for p in last_lin.parameters():
+            p.requires_grad = True
+
     elif attack_type == "RTAL":
-        # paper describes "re-initialize the last layer before FTAL" for RTAL,
-        # but they also say "re-initialize the last layer before FTAL" — we'll reinit last layer then fine-tune all params.
+        if last_lin is None:
+            raise RuntimeError("RTAL: couldn't find final linear layer.")
         reinit_last_layer(model)
         for p in model.parameters():
             p.requires_grad = True
+
     else:
         raise ValueError(f"Unknown attack type: {attack_type}")
 
-    params = [p for p in model.parameters() if p.requires_grad]
-    return params
+    # set BN/Dropout to eval if their module params are all frozen (stability)
+    for _, module in model.named_modules():
+        params = list(module.parameters(recurse=False))
+        if params and not any(p.requires_grad for p in params):
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.Dropout)):
+                module.eval()
 
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    return trainable
+
+# ---------------------------
+# Training loop
+# ---------------------------
 def finetune(args):
-    device = torch.device(args.device if torch.cuda.is_available() or 'cpu' in args.device else "cpu")
-    # build model skeleton with same architecture and num_classes
     args.dataset = args.dataset.lower()
     if args.dataset == "cifar10":
         args.num_classes = 10
@@ -118,85 +146,74 @@ def finetune(args):
     elif args.dataset == "imagenet":
         args.num_classes = 1000
     else:
-        raise ValueError("Unknown dataset")
+        raise ValueError(f"Unknown dataset: {args.dataset}")
 
-    model = build_model(args)
-    model = model.to(device)
+    device = device_for(args)
+    print(f"[info] using device: {device}")
 
-    # load source weights
-    src = torch.load(args.source, map_location="cpu")
-    # typical source saved is state_dict only; try to be flexible
-    if isinstance(src, dict) and ("model_state" in src or "state_dict" in src):
-        state = src.get("model_state", src.get("state_dict", src))
-        model.load_state_dict(state)
-    elif isinstance(src, dict):
-        # maybe it is state_dict already
-        try:
-            model.load_state_dict(src)
-        except Exception as e:
-            # try to find inner keys
-            keys = list(src.keys())
-            # if saved as plain weights tensor dict, attempt load
-            model.load_state_dict(src)
-    else:
-        model.load_state_dict(src)
-
-    # configure attack-specific trainable params
+    model = build_model(args).to(device)
+    robust_load_state(model, args.source)
     params = set_trainable_layers(model, args.attack)
 
-    # choose lr per paper:
+    # paper-like lr choices: FT* small, RT* larger
     if args.attack in ("FTLL", "FTAL"):
-        lr = 0.001
-    else:  # RTLL, RTAL
-        lr = 0.01
+        lr = 1e-3
+    else:
+        lr = 1e-2
 
     optimizer = optim.SGD(params, lr=lr, momentum=0.9, weight_decay=5e-4, nesterov=False)
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60, 120, 160], gamma=0.1)
 
-    # loader: attacker uses reserved 'remain' split from allocate_data
-    train_loader = load_aux_dataset(args)
+    train_loader = load_aux_dataset_from_remain(args)
 
-    # training loop (50 epochs per paper)
-    model.train()
+    # training loop
     for epoch in range(args.epochs):
-        total = 0
-        correct = 0
+        model.train()
         running_loss = 0.0
+        correct = 0
+        total = 0
         for xb, yb in train_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
-            optimizer.zero_grad()
-            out = model(xb)
-            loss = nn.functional.cross_entropy(out, yb)
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(xb)
+            loss = nn.functional.cross_entropy(logits, yb)
             loss.backward()
             optimizer.step()
 
             running_loss += float(loss.item()) * xb.size(0)
-            preds = out.argmax(dim=1)
+            preds = logits.argmax(dim=1)
             correct += (preds == yb).sum().item()
             total += xb.size(0)
 
         scheduler.step()
-        acc = 100.0 * correct / total if total > 0 else 0.0
-        print(f"[{args.attack}] Epoch {epoch+1}/{args.epochs} loss={running_loss/total:.4f} acc={acc:.2f}%")
+        avg_loss = running_loss / total if total else 0.0
+        acc = 100.0 * correct / total if total else 0.0
+        print(f"[{args.attack}] Epoch {epoch+1:03d}/{args.epochs}  lr={optimizer.param_groups[0]['lr']:.5f}  loss={avg_loss:.4f}  acc={acc:.2f}%")
 
-    # save stolen model copy
     os.makedirs(args.out_dir, exist_ok=True)
-    save_name = f"{args.attack}_stolen.pth"
-    save_path = os.path.join(args.out_dir, save_name)
+    save_path = os.path.join(args.out_dir, f"{args.attack}_stolen.pth")
     torch.save({"model_state": model.state_dict(), "attack": args.attack, "args": vars(args)}, save_path)
-    print(f"Saved {args.attack} stolen-model to: {save_path}")
+    print(f"[info] Saved {args.attack} stolen-model to: {save_path}")
     return save_path
 
-if __name__ == "__main__":
+# ---------------------------
+# CLI
+# ---------------------------
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", type=str, required=True, help="Path to source model .pth (source_model.pth)")
-    parser.add_argument("--out_dir", type=str, default="./results/stolen", help="Directory to save stolen model")
-    parser.add_argument("--attack", type=str, choices=["FTLL","FTAL","RTLL","RTAL"], required=True)
-    parser.add_argument("--data_path", type=str, default="./results", help="Base results/data path (must contain allocated_data)")
-    parser.add_argument("--dataset", type=str, default="cifar10", help="cifar10|cifar100|imagenet")
+    parser.add_argument("--source", type=str, required=True, help="Path to source model .pth")
+    parser.add_argument("--out_dir", type=str, default="./results/stolen", help="Where to save the stolen model")
+    parser.add_argument("--attack", type=str, choices=["FTLL", "FTAL", "RTLL", "RTAL"], required=True)
+    parser.add_argument("--data_path", type=str, default="./results", help="Base path containing <dataset>/allocated_data/data_log.pth")
+    parser.add_argument("--dataset", type=str, default="cifar10")
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=50)  # paper uses 50
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--num_workers", type=int, default=4)
     args = parser.parse_args()
     finetune(args)
+
+if __name__ == "__main__":
+    main()

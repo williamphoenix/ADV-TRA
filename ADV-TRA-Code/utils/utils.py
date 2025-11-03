@@ -9,14 +9,46 @@ import copy
 import torch.nn as nn
 import os
 
+import importlib.util
+import sys
+
+def load_classifier():
+    classifier_path = "/student/wphoenix/ml/adv/TIL_Fingerprinting/attacks/classifier.py"
+    module_name = "custom_classifier"
+
+    if module_name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(module_name, classifier_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[module_name] = module
+    else:
+        module = sys.modules[module_name]
+
+    return module.Classifier
+
 
 
 def build_model(args):
+    arch = getattr(args, "arch", "resnet18")
+
+    if arch == "custom_cnn":
+        Classifier = load_classifier()
+        image_size = 32
+        image_channels = 3
+        model = Classifier(
+            image_size=image_size,
+            image_channels=image_channels,
+            classes=args.num_classes,
+            depth=getattr(args, "depth", 2),
+            fc_layers=getattr(args, "fc_layers", 3),
+            fc_units=getattr(args, "fc_units", 1000),
+        )
+        return model
 
     if args.dataset == "cifar10":
         model = torchvision.models.resnet18(num_classes=args.num_classes)
         model.conv1 = nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False)  
-        model.maxpool = nn.MaxPool2d(1, 1, 0) 
+        model.maxpool = nn.MaxPool2d(1, 1, 0)
         
     elif args.dataset == "cifar100":
         model = wideresnet()
